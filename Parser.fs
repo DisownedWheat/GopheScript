@@ -248,89 +248,12 @@ let rec parseTree currentIndent tokens ast =
                         t
                         { ast with
                             Children = a :: ast.Children }
-                // | Lexer.Assign _ ->
-                //     parseTree
-                //         currentIndent
-                //         restOfTokens
-                //         {ast with
-                //             Children =
-                //             { Type = Assignment
-                //               Value = token.Value
-                //               Children = []
-                //               Line = token.Line
-                //               Column = token.Column
-                //               Indent = currentIndent } :: ast.Children}
                 | Lexer.Colon _ ->
                     parseTree
                         currentIndent
                         restOfTokens
                         { ast with
                             Children = (mapFunc token PropertyAssignment :: ast.Children) }
-                // match ast.Type with
-                // | ObjectLiteral
-                // | Object ->
-                //     parseTree
-                //         currentIndent
-                //         restOfTokens
-                //         { ast with
-                //             Children =
-                //                 { Type = PropertyAssignment
-                //                   value = token.Value
-                //                   Children = []
-                //                   Line = token.Line
-                //                   Column = token.Column
-                //                   Indent = currentIndent }
-                //                 :: ast.Children }
-                // | Root
-                // | ParenExpression
-                // | Expression ->
-                //     parseTree
-                //         currentIndent
-                //         restOfTokens
-                //         { ast with
-                //             Type = Object
-                //             Children =
-                //                 { Type = PropertyAssignment
-                //                   value = token.Value
-                //                   Children = []
-                //                   Line = token.Line
-                //                   Column = token.Column
-                //                   Indent = currentIndent }
-                //                 :: ast.Children }
-
-                // | Lexer.Period _ ->
-                //     match restOfTokens with
-                //     | Lexer.Identifier nextToken :: _ ->
-                //         parseTree
-                //             currentIndent
-                //             restOfTokens
-                //             { ast with
-                //                 Children =
-                //                     { Type = PropertyAccess
-                //                       Value = token.Value
-                //                       Children = []
-                //                       Line = nextToken.Line
-                //                       Column = nextToken.Column
-                //                       Indent = currentIndent }
-                //                     :: ast.Children }
-                //     | _ -> raise (ParseException(token, token.Line, token.Column, "Expected identifier"))
-                // | Lexer.LBracket _ ->
-                //     let t, a =
-                //         parseTree
-                //             currentIndent
-                //             rest
-                //             { Type = IndexAccess
-                //               Value = token.Value
-                //               Children = []
-                //               Line = token.Line
-                //               Column = token.Column
-                //               Indent = currentIndent }
-
-                //     parseTree
-                //         currentIndent
-                //         t
-                //         { ast with
-                //             Children = a :: ast.Children }
                 | _ ->
                     parseTree
                         currentIndent
@@ -395,23 +318,6 @@ let rec parseTree currentIndent tokens ast =
             match rest with
             | [] -> raise (ParseException(token, token.Line, token.Column, "Expected function body"))
             | _ -> curriedParseFunc FuncDef token
-        // | nextToken :: restOfTokens ->
-        //     match nextToken with
-        //     | Lexer.NewLine _ ->
-        //         let i, t = handleNewLine 0 restOfTokens ast
-        //         parseTree
-        //             i
-        //             t
-        //             { ast with
-        //                 Children =
-        //                     { Type = FuncDef
-        //                       Value = ""
-        //                       Children = []
-        //                       Line = token.Line
-        //                       Column = token.Column
-        //                       Indent = i }
-        //                     :: { Type = Newline; Value = ""; Children = []; Line = ast.Line; Column = ast.Column; Indent = ast.Indent } :: ast.Children }
-        //     | _ -> parseTree currentIndent rest { ast with Type = FuncBody }
         | Lexer.Comma x ->
             match ast.Type with
             | ArgumentList
@@ -564,23 +470,6 @@ let rec parseTree currentIndent tokens ast =
                       Line = x.Line
                       Column = x.Column
                       Indent = currentIndent }
-        // | Lexer.LBracket token :: restOfTokens ->
-        //     let t, a =
-        //         parseTree
-        //             currentIndent
-        //             restOfTokens
-        //             { Type = IndexAccess
-        //               Value = "this"
-        //               Children = []
-        //               Line = token.Line
-        //               Column = token.Column
-        //               Indent = currentIndent }
-
-        // parseTree
-        //     currentIndent
-        //     t
-        //     { ast with
-        //         Children = a :: ast.Children }
         | Lexer.And x -> curriedParseFunc And x
         | Lexer.Or x -> curriedParseFunc Or x
         | Lexer.True x -> curriedParseFunc True x

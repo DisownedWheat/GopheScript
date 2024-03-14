@@ -76,11 +76,6 @@ and TransformerNode =
     | NoOp
     | EOF
 
-let test (a: TransformerNode) =
-    match a with
-    | RootNode x when x.Children.Length > 0 -> true
-    | RootNode { Children = children } -> false
-
 
 let raiseTransformerException (ast: Parser.ASTNode) (message: string) node =
     raise (
@@ -367,7 +362,6 @@ and parseAST
                     remainingNodes, TypedIdentifierNode { Identifier = head.Value; Type = t }
                 | _ -> tail, (Identifier head.Value)
         | Parser.Newline -> simplified children
-// | _ -> simplified (Identifier head.Value :: children)
 
 and buildTree (delimiter: Delimiter) (nodes: Parser.ASTNode list) (current) =
     match nodes with
