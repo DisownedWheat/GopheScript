@@ -8,6 +8,7 @@ type AST =
     | FuncDef // Function definition e.g. ->
     | Expression // e.g. x + y
     | ParenExpression // e.g. (x + y)
+    | TypedParenExpression // e.g. (x + y)::int
     | Object // Object literal without braces
     | ArrayLiteral // e.g. [1, 2, 3]
     | ObjectLiteral // e.g. { x: 1, y: 2 }
@@ -47,6 +48,7 @@ type AST =
     | Newline
     | Pointer
     | PointerDeref
+    | IndentedBlock
     | EOF
 
 
@@ -58,6 +60,10 @@ type ASTNode =
       Line: int
       Column: int
       Indent: int }
+
+type Delimiter =
+    | Func of (int -> Lexer.TokenType -> Lexer.TokenType list -> ASTNode -> bool)
+    | NoDelimiter
 
 exception ParseException of (Lexer.Token * int * int * string)
 
@@ -97,6 +103,7 @@ let checkClosing token rest ast =
     | Lexer.RParen x ->
         match ast.Type with
         | ParenExpression
+        | TypedArgumentList
         | ArgumentList -> (rest, ast)
         | _ -> raiseParseError "Unexpected closing parenthesis" ast (Some x)
     | Lexer.RBrace x ->
@@ -124,6 +131,9 @@ let rec ignoreWhitespace ignoreNewLines tokens =
             else
                 tokens
         | _ -> tokens
+
+let getNextIgnoreWhitespace ignoreNewLines tokens =
+    ignoreWhitespace ignoreNewLines tokens |> List.head
 
 let rec handleNewLine indent tokens ast =
     match tokens with
@@ -174,315 +184,342 @@ let rec parseTypeFunc
     | Lexer.Period head :: rest -> parseTypeFunc mapFunc rest (mapFunc head MemberAccess :: current) ast
     | Lexer.Pointer head :: rest -> parseTypeFunc mapFunc rest (mapFunc head Pointer :: current) ast
     | Lexer.PointerDeref head :: rest -> parseTypeFunc mapFunc rest (mapFunc head PointerDeref :: current) ast
+    | Lexer.Comma _ :: _ -> t, current
+    | Lexer.RParen _ :: _ -> t, current
     | Lexer.Whitespace _ :: rest -> rest, current
     | _ -> raiseParseError "Expected type" ast None
 
-let rec parseTree currentIndent tokens ast =
+let rec parseTree (delimiter: Delimiter) currentIndent tokens ast =
     let mapFunc = mapTokenToNode currentIndent
+    let parse = parseTree delimiter
 
     match tokens with
     | [] -> ([], ast)
     | head :: rest ->
-        let curriedRecursiveParseFunc = recursiveParseFunc currentIndent rest ast parseTree
 
-        let curriedParseFunc t (token: Lexer.Token) =
-            parseTree
-                currentIndent
-                rest
-                { ast with
-                    Children = (mapFunc token t) :: ast.Children }
 
-        match head with
-        | Lexer.Error x -> raise (ParseException(x, ast.Line, ast.Column, "Unexpected error token"))
-        | Lexer.EOF x ->
-            ([],
-             { ast with
-                 Children =
-                     ({ Type = EOF
-                        Children = []
-                        Line = x.Line
-                        Value = "EOF"
-                        Column = x.Column
-                        Indent = currentIndent }
-                      :: ast.Children) })
-        | Lexer.Import x ->
-            match rest with
-            | Lexer.String token :: restOfTokens ->
-                parseTree
+        match delimiter with
+        | Func f when f currentIndent head rest ast -> tokens, ast
+        | _ ->
+            let curriedRecursiveParseFunc =
+                recursiveParseFunc currentIndent rest ast (parseTree delimiter)
+
+            let curriedParseFunc t (token: Lexer.Token) =
+                parse
                     currentIndent
-                    restOfTokens
+                    rest
                     { ast with
-                        Children = mapFunc token Import :: ast.Children }
-            | _ -> raise (ParseException(x, x.Line, x.Column, "Expected string literal"))
-        | Lexer.NewLine x ->
-            let i, t = handleNewLine 0 rest ast
+                        Children = (mapFunc token t) :: ast.Children }
 
-            parseTree
-                i
-                t
-                { ast with
-                    Children =
-                        { Type = Newline
-                          Value = ""
-                          Children = []
-                          Line = x.Line
-                          Column = x.Column
-                          Indent = currentIndent }
-                        :: ast.Children }
-        | Lexer.Whitespace _
-        | Lexer.Tab _ -> parseTree currentIndent rest ast
-        | Lexer.Hash _ ->
-            let tokens = handleComment rest
-            parseTree currentIndent tokens ast
-        | Lexer.Period x -> curriedParseFunc MemberAccess x
-        | Lexer.Identifier token ->
-            match rest with
-            | [] -> raiseParseError "Expected token" ast (Some token)
-            | nextToken :: restOfTokens ->
-                match nextToken with
-                | Lexer.LParen _ ->
-                    let t, a = parseTree currentIndent restOfTokens (mapFunc token FunctionCall)
+            match head with
+            | Lexer.Error x -> raise (ParseException(x, ast.Line, ast.Column, "Unexpected error token"))
+            | Lexer.EOF x ->
+                ([],
+                 { ast with
+                     Children =
+                         ({ Type = EOF
+                            Children = []
+                            Line = x.Line
+                            Value = "EOF"
+                            Column = x.Column
+                            Indent = currentIndent }
+                          :: ast.Children) })
+            | Lexer.Import x ->
+                match rest with
+                | Lexer.String token :: restOfTokens ->
+                    parse
+                        currentIndent
+                        restOfTokens
+                        { ast with
+                            Children = mapFunc token Import :: ast.Children }
+                | _ -> raise (ParseException(x, x.Line, x.Column, "Expected string literal"))
+            | Lexer.NewLine x ->
+                let i, t = handleNewLine 0 rest ast
 
-                    parseTree
+                match (i > currentIndent, i < currentIndent) with
+                | (true, false) ->
+                    let t, a =
+                        parse
+                            i
+                            t
+                            { Type = IndentedBlock
+                              Value = ""
+                              Children = []
+                              Line = x.Line
+                              Column = x.Column
+                              Indent = i }
+
+                    t,
+                    { ast with
+                        Children = a :: ast.Children }
+                | (false, false) ->
+                    parse
+                        i
+                        t
+                        { ast with
+                            Children =
+                                { Type = Newline
+                                  Value = ""
+                                  Children = []
+                                  Line = x.Line
+                                  Column = x.Column
+                                  Indent = currentIndent }
+                                :: ast.Children }
+                | false, true -> t, ast
+                | _ -> raise (ParseException(x, x.Line, x.Column, "Unexpected indentation"))
+            | Lexer.Whitespace _
+            | Lexer.Tab _ -> parse currentIndent rest ast
+            | Lexer.Hash _ ->
+                let tokens = handleComment rest
+                parse currentIndent tokens ast
+            | Lexer.Period x -> curriedParseFunc MemberAccess x
+            | Lexer.Identifier token ->
+                match rest with
+                | [] -> raiseParseError "Expected token" ast (Some token)
+                | nextToken :: restOfTokens ->
+                    match nextToken with
+                    | Lexer.LParen _ ->
+                        let t, a = parse currentIndent restOfTokens (mapFunc token FunctionCall)
+
+                        parse
+                            currentIndent
+                            t
+                            { ast with
+                                Children = a :: ast.Children }
+                    | Lexer.Colon _ ->
+                        parse
+                            currentIndent
+                            restOfTokens
+                            { ast with
+                                Children = (mapFunc token PropertyAssignment :: ast.Children) }
+                    | _ ->
+                        parse
+                            currentIndent
+                            rest
+                            { ast with
+                                Children =
+                                    { Type = Identifier
+                                      Value = token.Value
+                                      Children = []
+                                      Line = token.Line
+                                      Column = token.Column
+                                      Indent = currentIndent }
+                                    :: ast.Children }
+            | Lexer.Number token -> curriedParseFunc Number token
+            | Lexer.LParen token ->
+                let t, a = parse currentIndent rest (mapFunc token ParenExpression)
+
+                match List.head <| ignoreWhitespace false t with
+                | Lexer.FuncDef _ ->
+                    parse
+                        currentIndent
+                        t
+                        { ast with
+                            Children = { a with Type = ArgumentList } :: ast.Children }
+                | Lexer.DoubleColon _ ->
+
+                    let t, returnType = parseTypeFunc mapFunc (List.tail t) [] ast
+
+                    match ignoreWhitespace false t with
+                    | Lexer.FuncDef _ :: _ ->
+                        parse
+                            currentIndent
+                            t
+                            { ast with
+                                Children =
+                                    { a with
+                                        Type = TypedArgumentList
+                                        Value = List.rev returnType |> List.map (fun x -> x.Value) |> String.concat "" }
+                                    :: ast.Children }
+                    | _ -> raiseParseError "Expected function definition" ast None
+                | _ ->
+                    parse
                         currentIndent
                         t
                         { ast with
                             Children = a :: ast.Children }
-                | Lexer.Colon _ ->
-                    parseTree
+            | Lexer.RParen _ -> checkClosing head rest ast
+            | Lexer.LBracket token -> curriedRecursiveParseFunc token ArrayLiteral
+            | Lexer.RBracket _ -> checkClosing head rest ast
+            | Lexer.LBrace token -> curriedRecursiveParseFunc token ObjectLiteral
+            | Lexer.RBrace _ -> checkClosing head rest ast
+            | Lexer.FuncDef token ->
+                match rest with
+                | [] -> raise (ParseException(token, token.Line, token.Column, "Expected function body"))
+                | _ -> curriedParseFunc FuncDef token
+            | Lexer.Comma x ->
+                match ast.Type with
+                | TypeDef -> rest, ast
+                | ArgumentList
+                | TypedArgumentList
+                | Object
+                | ObjectLiteral
+                | ObjectDestructure
+                | ArrayLiteral
+                | ParenExpression
+                | ArrayDestructure -> parse currentIndent rest ast
+                | _ -> raiseParseError "Unexpected comma" ast (Some x)
+            | Lexer.If x -> curriedParseFunc IfExpression x
+            | Lexer.Else x -> curriedParseFunc ElseExpression x
+            | Lexer.Then x -> curriedParseFunc ThenExpression x
+            | Lexer.String token -> curriedParseFunc StringLiteral token
+            | Lexer.Operator token -> curriedParseFunc Operator token
+            | Lexer.DoubleColon token ->
+                let t, returnType = parseTypeFunc mapFunc rest [] ast
+
+                parse
+                    currentIndent
+                    t
+                    { ast with
+                        Children =
+                            { Type = TypeDef
+                              Value = token.Value
+                              Children = returnType
+                              Line = token.Line
+                              Column = token.Column
+                              Indent = currentIndent }
+                            :: ast.Children }
+
+            | Lexer.Continue token -> curriedParseFunc Continue token
+            | Lexer.Return token -> curriedParseFunc Return token
+            | Lexer.Break token -> curriedParseFunc Break token
+            | Lexer.Switch x -> // TODO implement switch
+                raiseParseError "Switch statement not implemented" ast (Some x)
+            | Lexer.Assign x -> curriedParseFunc Assignment x
+            | Lexer.For x -> curriedParseFunc For x
+            | Lexer.While x -> curriedParseFunc While x
+            | Lexer.Do x -> curriedParseFunc DoExpression x
+            | Lexer.DoublePeriod x -> curriedParseFunc RangeExpression x
+            | Lexer.Pointer x ->
+                match rest with
+                | Lexer.Whitespace _ :: restOfTokens ->
+                    parse
                         currentIndent
                         restOfTokens
                         { ast with
-                            Children = (mapFunc token PropertyAssignment :: ast.Children) }
+                            Children =
+                                { Type = Operator
+                                  Value = x.Value
+                                  Children = []
+                                  Line = x.Line
+                                  Column = x.Column
+                                  Indent = currentIndent }
+                                :: ast.Children }
                 | _ ->
-                    parseTree
+                    parse
                         currentIndent
                         rest
                         { ast with
                             Children =
-                                { Type = Identifier
-                                  Value = token.Value
+                                { Type = Pointer
+                                  Value = x.Value
+                                  Children = []
+                                  Line = x.Line
+                                  Column = x.Column
+                                  Indent = currentIndent }
+                                :: ast.Children }
+            | Lexer.PointerDeref x ->
+                match rest with
+                | Lexer.Whitespace _ :: restOfTokens ->
+                    parse
+                        currentIndent
+                        restOfTokens
+                        { ast with
+                            Children =
+                                { Type = Operator
+                                  Value = x.Value
+                                  Children = []
+                                  Line = x.Line
+                                  Column = x.Column
+                                  Indent = currentIndent }
+                                :: ast.Children }
+                | _ ->
+                    parse
+                        currentIndent
+                        rest
+                        { ast with
+                            Children =
+                                { Type = PointerDeref
+                                  Value = x.Value
+                                  Children = []
+                                  Line = x.Line
+                                  Column = x.Column
+                                  Indent = currentIndent }
+                                :: ast.Children }
+            | Lexer.Struct x ->
+                match rest with
+                | Lexer.Identifier token :: restOfTokens ->
+                    parse
+                        currentIndent
+                        restOfTokens
+                        { Type = StructDefinition
+                          Value = token.Value
+                          Children = []
+                          Line = token.Line
+                          Column = token.Column
+                          Indent = currentIndent }
+                | _ -> raiseParseError "Expected identifier" ast None
+            | Lexer.Extends x ->
+                match rest with
+                | Lexer.Identifier token :: restOfTokens ->
+                    parse
+                        currentIndent
+                        restOfTokens
+                        { Type = Extends
+                          Value = token.Value
+                          Children = []
+                          Line = token.Line
+                          Column = token.Column
+                          Indent = currentIndent }
+                | _ -> raiseParseError "Extends token expects Identifier" ast None
+            | Lexer.Increment x -> curriedParseFunc IncrementExpression x
+            | Lexer.Decrement x -> curriedParseFunc DecrementExpression x
+            | Lexer.MemberAccess x ->
+                match rest with
+                | Lexer.Identifier token :: restOfTokens ->
+                    parse
+                        currentIndent
+                        restOfTokens
+                        { ast with
+                            Children =
+                                { Type = MemberAccess
+                                  Value = "this"
                                   Children = []
                                   Line = token.Line
                                   Column = token.Column
                                   Indent = currentIndent }
                                 :: ast.Children }
-        | Lexer.Number token -> curriedParseFunc Number token
-        | Lexer.LParen token ->
-            let t, a =
-                parseTree
-                    currentIndent
-                    rest
-                    { Type = ParenExpression
-                      Value = ""
-                      Children = []
-                      Line = token.Line
-                      Column = token.Column
-                      Indent = currentIndent }
-
-            match List.head <| ignoreWhitespace false t with
-            | Lexer.FuncDef _ ->
-                parseTree
-                    currentIndent
-                    t
-                    { ast with
-                        Children = { a with Type = ArgumentList } :: ast.Children }
-            | Lexer.DoubleColon _ ->
-
-                let t, returnType = parseTypeFunc mapFunc (List.tail t) [] ast
-
-                match ignoreWhitespace false t with
-                | Lexer.FuncDef _ :: restOfTokens ->
-                    parseTree
+                | _ ->
+                    parse
                         currentIndent
-                        t
-                        { ast with
-                            Children =
-                                { a with
-                                    Type = TypedArgumentList
-                                    Value = List.rev returnType |> List.map (fun x -> x.Value) |> String.concat "" }
-                                :: ast.Children }
-                | _ -> raiseParseError "Expected function definition" ast None
-            | _ ->
-                parseTree
-                    currentIndent
-                    t
-                    { ast with
-                        Children = a :: ast.Children }
-        | Lexer.RParen _ -> checkClosing head rest ast
-        | Lexer.LBracket token -> curriedRecursiveParseFunc token ArrayLiteral
-        | Lexer.RBracket _ -> checkClosing head rest ast
-        | Lexer.LBrace token -> curriedRecursiveParseFunc token ObjectLiteral
-        | Lexer.RBrace _ -> checkClosing head rest ast
-        | Lexer.FuncDef token ->
-            match rest with
-            | [] -> raise (ParseException(token, token.Line, token.Column, "Expected function body"))
-            | _ -> curriedParseFunc FuncDef token
-        | Lexer.Comma x ->
-            match ast.Type with
-            | ArgumentList
-            | Object
-            | ObjectLiteral
-            | ObjectDestructure
-            | ArrayLiteral
-            | ParenExpression
-            | ArrayDestructure -> parseTree currentIndent rest ast
-            | _ -> raiseParseError "Unexpected comma" ast (Some x)
-        | Lexer.If x -> curriedParseFunc IfExpression x
-        | Lexer.Else x -> curriedParseFunc ElseExpression x
-        | Lexer.Then x -> curriedParseFunc ThenExpression x
-        | Lexer.String token -> curriedParseFunc StringLiteral token
-        | Lexer.Operator token -> curriedParseFunc Operator token
-        | Lexer.DoubleColon token ->
-            let t, a =
-                parseTree
-                    currentIndent
-                    rest
-                    { Type = TypeDef
-                      Value = token.Value
-                      Children = []
-                      Line = token.Line
-                      Column = token.Column
-                      Indent = currentIndent }
-
-            parseTree
-                currentIndent
-                t
-                { ast with
-                    Children = a :: ast.Children }
-
-        | Lexer.Continue token -> curriedParseFunc Continue token
-        | Lexer.Return token -> curriedParseFunc Return token
-        | Lexer.Break token -> curriedParseFunc Break token
-        | Lexer.Switch x -> // TODO implement switch
-            raiseParseError "Switch statement not implemented" ast (Some x)
-        | Lexer.Assign x -> curriedParseFunc Assignment x
-        | Lexer.For x -> curriedParseFunc For x
-        | Lexer.While x -> curriedParseFunc While x
-        | Lexer.Do x -> curriedParseFunc DoExpression x
-        | Lexer.DoublePeriod x -> curriedParseFunc RangeExpression x
-        | Lexer.Pointer x ->
-            match rest with
-            | Lexer.Whitespace _ :: restOfTokens ->
-                parseTree
-                    currentIndent
-                    restOfTokens
-                    { ast with
-                        Children =
-                            { Type = Operator
-                              Value = x.Value
-                              Children = []
-                              Line = x.Line
-                              Column = x.Column
-                              Indent = currentIndent }
-                            :: ast.Children }
-            | _ ->
-                parseTree
-                    currentIndent
-                    rest
-                    { ast with
-                        Children =
-                            { Type = Pointer
-                              Value = x.Value
-                              Children = []
-                              Line = x.Line
-                              Column = x.Column
-                              Indent = currentIndent }
-                            :: ast.Children }
-        | Lexer.PointerDeref x ->
-            match rest with
-            | Lexer.Whitespace _ :: restOfTokens ->
-                parseTree
-                    currentIndent
-                    restOfTokens
-                    { ast with
-                        Children =
-                            { Type = Operator
-                              Value = x.Value
-                              Children = []
-                              Line = x.Line
-                              Column = x.Column
-                              Indent = currentIndent }
-                            :: ast.Children }
-            | _ ->
-                parseTree
-                    currentIndent
-                    rest
-                    { ast with
-                        Children =
-                            { Type = PointerDeref
-                              Value = x.Value
-                              Children = []
-                              Line = x.Line
-                              Column = x.Column
-                              Indent = currentIndent }
-                            :: ast.Children }
-        | Lexer.Struct x ->
-            match rest with
-            | Lexer.Identifier token :: restOfTokens ->
-                parseTree
-                    currentIndent
-                    restOfTokens
-                    { Type = StructDefinition
-                      Value = token.Value
-                      Children = []
-                      Line = token.Line
-                      Column = token.Column
-                      Indent = currentIndent }
-            | _ -> raiseParseError "Expected identifier" ast None
-        | Lexer.Extends x ->
-            match rest with
-            | Lexer.Identifier token :: restOfTokens ->
-                parseTree
-                    currentIndent
-                    restOfTokens
-                    { Type = Extends
-                      Value = token.Value
-                      Children = []
-                      Line = token.Line
-                      Column = token.Column
-                      Indent = currentIndent }
-            | _ -> raiseParseError "Extends token expects Identifier" ast None
-        | Lexer.Increment x -> curriedParseFunc IncrementExpression x
-        | Lexer.Decrement x -> curriedParseFunc DecrementExpression x
-        | Lexer.MemberAccess x ->
-            match rest with
-            | Lexer.Identifier token :: restOfTokens ->
-                parseTree
-                    currentIndent
-                    restOfTokens
-                    { ast with
-                        Children =
-                            { Type = MemberAccess
-                              Value = "this"
-                              Children = []
-                              Line = token.Line
-                              Column = token.Column
-                              Indent = currentIndent }
-                            :: ast.Children }
-            | _ ->
-                parseTree
-                    currentIndent
-                    rest
-                    { Type = This
-                      Value = "this"
-                      Children = []
-                      Line = x.Line
-                      Column = x.Column
-                      Indent = currentIndent }
-        | Lexer.And x -> curriedParseFunc And x
-        | Lexer.Or x -> curriedParseFunc Or x
-        | Lexer.True x -> curriedParseFunc True x
-        | Lexer.False x -> curriedParseFunc False x
-        | _ -> raiseParseError "Unexpected token" ast None
+                        rest
+                        { Type = This
+                          Value = "this"
+                          Children = []
+                          Line = x.Line
+                          Column = x.Column
+                          Indent = currentIndent }
+            | Lexer.And x -> curriedParseFunc And x
+            | Lexer.Or x -> curriedParseFunc Or x
+            | Lexer.True x -> curriedParseFunc True x
+            | Lexer.False x -> curriedParseFunc False x
+            | _ -> raiseParseError "Unexpected token" ast None
 
 let rec reverseChildren ast =
     { ast with
         Children = List.rev ast.Children |> List.map reverseChildren }
 
+let rec recursiveParse tokens (ast: ASTNode) =
+    match tokens with
+    | [] -> (tokens, ast)
+    | _ ->
+        let t, a = parseTree NoDelimiter 0 tokens ast
+
+        recursiveParse t a
+
+
 let parse tokens =
-    parseTree
-        0
+    recursiveParse
         tokens
         { Type = Root
           Value = ""
