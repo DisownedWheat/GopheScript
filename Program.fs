@@ -1,7 +1,7 @@
 ﻿module main
 
 open Newtonsoft.Json
-let pipeLine = Lexer.lex >> Parser.parse // >> Transformer.transform
+let pipeLine = Lexer.lex >> Parser.parse >> Transformer.transform
 
 let rec compile filePath =
     try

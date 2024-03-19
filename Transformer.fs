@@ -77,9 +77,11 @@ and TransformerNode =
     | AccessNode of AccessChain
     | ExpressionNode of TransformerNode list
     | ArrayLiteral of TransformerNode list
+    | DoExpressionNode of TransformerNode
     | NoOp
     | EOF
 
+and BuildContext = TransformerNode
 
 type Delimiter =
     | Node of Parser.AST
@@ -95,29 +97,26 @@ let raiseTransformerException (ast: Parser.ASTNode) (message: string) node =
         )
     )
 
-let rec parseObject (isLiteral: bool) (indent: int) (remaining: Parser.ASTNode list) (children: ObjectProperty list) =
-    let rec parse (isLiteral: bool) (indent: int) (remaining: Parser.ASTNode list) (children: ObjectProperty list) =
-        let func = parse isLiteral indent
+let rec parseObject (isLiteral: bool) (remaining: Parser.ASTNode list) (children: ObjectProperty list) =
+    let rec parse (isLiteral: bool) (remaining: Parser.ASTNode list) (children: ObjectProperty list) =
+        let func = parse isLiteral
 
         match remaining with
         | [] -> (remaining, children)
         | head :: tail ->
-            match (isLiteral, head.Indent < indent) with
-            | false, true -> (remaining, children)
-            | _ ->
-                match head.Type with
-                | Parser.PropertyAssignment ->
-                    let (returnNodes, property) = parseAST tail []
+            match head.Type with
+            | Parser.PropertyAssignment ->
+                let (returnNodes, property) = parseAST tail []
 
-                    match (head.Value.StartsWith("@"), property) with
-                    | false, FunctionDefinitionNode x -> func returnNodes (Method(head.Value, x) :: children)
-                    | true, FunctionDefinitionNode x -> func returnNodes (StaticMethod(head.Value, x) :: children)
-                    | false, _ -> func returnNodes (Property(head.Value, property) :: children)
-                    | true, _ -> func returnNodes (StaticProperty(head.Value, property) :: children)
-                | Parser.Newline -> func tail children
-                | _ -> raiseTransformerException head "Expected PropertyAssignment" (Error head.Value)
+                match (head.Value.StartsWith("@"), property) with
+                | false, FunctionDefinitionNode x -> func returnNodes (Method(head.Value, x) :: children)
+                | true, FunctionDefinitionNode x -> func returnNodes (StaticMethod(head.Value, x) :: children)
+                | false, _ -> func returnNodes (Property(head.Value, property) :: children)
+                | true, _ -> func returnNodes (StaticProperty(head.Value, property) :: children)
+            | Parser.Newline -> func tail children
+            | _ -> raiseTransformerException head "Expected PropertyAssignment" (Error head.Value)
 
-    let remaining, nodes = parse isLiteral indent remaining children
+    let remaining, nodes = parse isLiteral remaining children
     remaining, ObjectExpression { Properties = nodes }
 
 
@@ -136,7 +135,7 @@ and parseFunction (delimiter: Delimiter) (remaining: Parser.ASTNode list) (child
         match delimiter with
         | Node node when node = (head).Type -> (remaining, children)
         | DelimiterFunc func when func (head) (tail) -> (remaining, children)
-        | _ -> buildTree delimiter remaining children
+        | _ -> buildTree remaining children
 
 and parseFunctionArgs indent (remaining: Parser.ASTNode list) (children: FunctionArg list) =
     match remaining with
@@ -226,15 +225,12 @@ and parsePropertyAccess left (remaining: Parser.ASTNode list) =
 and parseAST
     (remaining: Parser.ASTNode list)
     (children: TransformerNode list)
+    (context: BuildContext)
     : (Parser.ASTNode list * TransformerNode) =
 
     match remaining with
     | [] -> (remaining, EOF)
-    // | head :: next :: tail when next.Type = Parser.Operator ->
-    //     let remaining, exp = parseOperatorExpression (Some(List.head children)) remaining []
-    //     remaining, (OperatorExpression exp)
     | head :: tail ->
-
         let simplified = parseAST tail
 
         match head.Type with
@@ -260,146 +256,118 @@ and parseAST
             match tail with
             | [] -> raiseTransformerException head "Expected Funcdef" (Error head.Value)
             | { Type = Parser.FuncDef } :: functionElements ->
-                let (delimiter, body) =
-                    match functionElements with
-                    | [] -> NoDelimiter, []
-                    | next :: body when next.Type = Parser.Newline ->
-                        (DelimiterFunc
-                         <| fun x nextNodes ->
-                             match x.Type with
-                             | Parser.Newline ->
-                                 match nextNodes with
-                                 | [] -> true
-                                 | next :: _ -> next.Indent <= x.Indent
-                             | _ -> x.Indent <= head.Indent),
-                        body
-                    | _ -> (Node Parser.Newline, functionElements)
-
                 let _, args = parseFunctionArgs head.Indent head.Children []
-                let remaining, body = parseFunction delimiter body []
 
-                remaining,
-                TypedFunctionDefinitionNode
-                    { Body = body
-                      Args = args
-                      ReturnType = head.Value }
+                match functionElements with
+                | [] -> raiseTransformerException head "Expected FuncBody" (Error head.Value)
+                | x :: _ when x.Type = Parser.IndentedBlock ->
+                    let (returnNodes, body) = buildTree x.Children []
+
+                    returnNodes,
+                    TypedFunctionDefinitionNode
+                        { Args = args
+                          Body = body
+                          ReturnType = head.Value }
+                | _ ->
+                    let remaining, body = parseFunction (Node Parser.Newline) functionElements []
+
+                    remaining,
+                    TypedFunctionDefinitionNode
+                        { Body = body
+                          Args = args
+                          ReturnType = head.Value }
             | _ -> raiseTransformerException head "Expected Funcdef" (Error head.Value)
         | Parser.ArgumentList ->
+
+            let _, args = parseFunctionArgs head.Indent head.Children []
+
             match tail with
             | [] -> raiseTransformerException head "Expected Funcdef" (Error head.Value)
             | { Type = Parser.FuncDef } :: functionElements ->
-                let (delimiter, body) =
-                    match functionElements with
-                    | [] -> NoDelimiter, []
-                    | next :: body when next.Type = Parser.Newline ->
-                        (DelimiterFunc
-                         <| fun x nextNodes ->
-                             match x.Type with
-                             | Parser.Newline ->
-                                 match nextNodes with
-                                 | [] -> true
-                                 | next :: _ -> next.Indent <= x.Indent
-                             | _ -> x.Indent <= head.Indent),
-                        body
-                    | _ -> (Node Parser.Newline, functionElements)
+                match functionElements with
+                | [] -> raiseTransformerException head "Expected FuncBody" (Error head.Value)
+                | x :: _ when x.Type = Parser.IndentedBlock ->
+                    let (returnNodes, body) = buildTree x.Children []
 
-                let _, args = parseFunctionArgs head.Indent head.Children []
-                let remaining, body = parseFunction delimiter body []
-                remaining, FunctionDefinitionNode { Body = body; Args = args }
+                    returnNodes, FunctionDefinitionNode { Args = args; Body = body }
+                | _ ->
+                    let _, args = parseFunctionArgs head.Indent head.Children []
+                    let returnNodes, body = parseFunction (Node Parser.Newline) functionElements []
+                    returnNodes, FunctionDefinitionNode { Body = body; Args = args }
             | _ -> raiseTransformerException head "Expected Funcdef" (Error head.Value)
         | Parser.FuncDef ->
             match tail with
             | [] -> raiseTransformerException head "Expected FuncBody" (Error head.Value)
-            | nextNode :: remainingNodes ->
+            | nextNode :: _ ->
                 match nextNode.Type with
-                | Parser.Newline ->
-                    let returnNodes, body =
-                        parseFunction
-                            (DelimiterFunc
-                             <| fun x nextNodes ->
-                                 match x.Type with
-                                 | Parser.Newline ->
-                                     match nextNodes with
-                                     | [] -> true
-                                     | next :: _ -> next.Indent <= x.Indent
-                                 | _ -> x.Indent <= head.Indent)
-                            remainingNodes
-                            []
+                | Parser.IndentedBlock ->
+                    let (returnNodes, body) = buildTree nextNode.Children []
 
                     (returnNodes, (FunctionDefinitionNode { Args = []; Body = body }))
                 | _ ->
                     let (returnNodes, body) = parseFunction (Node Parser.Newline) tail []
 
                     returnNodes, ((FunctionDefinitionNode { Args = []; Body = body }))
-        | Parser.PropertyAssignment -> parseObject false head.Indent remaining []
-        | Parser.ObjectLiteral -> parseObject true head.Indent tail []
+        | Parser.PropertyAssignment -> parseObject false remaining []
+        | Parser.ObjectLiteral -> parseObject true tail []
         | Parser.Number -> tail, Number head.Value
         | Parser.Identifier -> tail, Identifier head.Value
-        // match tail with
-        // | [] -> simplified (Identifier head.Value :: children)
-        // | nextNode :: remainingNodes ->
-        //     match nextNode.Type with
-        //     | Parser.Assignment ->
-        //         let (returnNodes, right) = parseAST remainingNodes children
-
-        //         returnNodes,
-        //         ((AssignmentNode
-        //             { Left = Identifier head.Value
-        //               Right = right }))
-        //     | Parser.Number
-        //     | Parser.Identifier ->
-
-        //         let (returnNodes, right) = parseFunctionCall tail []
-        //         returnNodes, (FunctionCallExpression { Args = right })
-        //     | Parser.ArgumentList ->
-        //         let (_, children) = parseFunctionCall nextNode.Children []
-        //         remainingNodes, (FunctionCallExpression { Args = children })
-        //     | Parser.Comma -> parseAST remainingNodes (Identifier head.Value :: children)
-        //     | Parser.TypeDef ->
-        //         let t = parseTypeDef tail []
-        //         remainingNodes, TypedIdentifierNode { Identifier = head.Value; Type = t }
-        //     | _ -> tail, (Identifier head.Value)
         | Parser.Newline -> simplified children
+        | Parser.DoExpression ->
+            match tail with
+            | { Type = Parser.FuncDef } :: _
+            | { Type = Parser.ArgumentList } :: _
+            | { Type = Parser.IndentedBlock } :: _
+            | { Type = Parser.TypedArgumentList } :: _ ->
+                let (returnNodes, body) = parseAST tail []
 
-and buildTree (delimiter: Delimiter) (nodes: Parser.ASTNode list) (current) =
+                returnNodes, DoExpressionNode body
+            | _ -> raiseTransformerException head "Expected Funcdef after DoExpression" (Error head.Value)
+        | Parser.IndentedBlock ->
+            match (List.head head.Children).Type with
+            | Parser.PropertyAssignment ->
+                let _, obj = parseObject false head.Children []
+                tail, obj
+            | _ ->
+                let (_, body) = buildTree head.Children []
+                tail, ExpressionNode body
+        | _ -> raiseTransformerException head "Unexpected Token" (Error(head.Value + " " + head.Type.ToString()))
+
+
+and buildTree (nodes: Parser.ASTNode list) (current) (context: BuildContext) =
     match nodes with
-    | [] -> nodes, (EOF :: current)
+    | [] -> nodes, current
     | { Type = Parser.EOF } :: _ -> nodes, current
     | _ ->
-        match delimiter with
-        | Node node when node = (List.head nodes).Type -> nodes, current
-        | DelimiterFunc func when func (List.head nodes) (List.tail nodes) -> nodes, current
-        | _ ->
-            let (returnNodes, child) = parseAST nodes []
+        let (returnNodes, child) = parseAST nodes [] context
 
-            match returnNodes with
-            | x :: _ when x.Type = Parser.Operator ->
-                let newNodes, right = parseOperatorExpression (Some child) returnNodes []
-                buildTree delimiter newNodes ((OperatorExpression right) :: current)
-            | x :: _ when x.Type = Parser.PropertyAccess ->
-                let newNodes, right = parsePropertyAccess child returnNodes
+        match returnNodes with
+        | x :: _ when x.Type = Parser.Operator ->
+            let newNodes, right = parseOperatorExpression (Some child) returnNodes []
+            buildTree newNodes ((OperatorExpression right) :: current) context
+        | x :: _ when x.Type = Parser.PropertyAccess ->
+            let newNodes, right = parsePropertyAccess child returnNodes
 
-                match current with
-                | AccessNode l :: rest -> buildTree delimiter newNodes (AccessNode(right :: l) :: rest)
-                | _ -> buildTree delimiter newNodes ((AccessNode [ right ]) :: current)
-            | x :: _ when x.Type = Parser.ArgumentList ->
-                let newNodes, right = parseFunctionCall returnNodes []
+            match current with
+            | AccessNode l :: rest -> buildTree newNodes (AccessNode(right :: l) :: rest)
+            | _ -> buildTree newNodes ((AccessNode [ right ]) :: current)
+        | x :: _ when x.Type = Parser.ArgumentList ->
+            let newNodes, right = parseFunctionCall returnNodes []
 
-                match current with
-                | FunctionCallExpression l :: rest ->
-                    buildTree delimiter newNodes (FunctionCallExpression { Args = right } :: rest)
-                | _ -> buildTree delimiter newNodes (FunctionCallExpression { Args = right } :: current)
-            | x :: rest when x.Type = Parser.Assignment ->
-                let newNodes, right = parseAST rest []
-                buildTree delimiter newNodes (AssignmentNode { Left = child; Right = right } :: current)
-            | x :: _ when x.Type = Parser.ObjectLiteral ->
-                let newNodes, obj = parseObject true x.Indent returnNodes []
+            match current with
+            | FunctionCallExpression l :: rest -> buildTree newNodes (FunctionCallExpression { Args = right } :: rest)
+            | _ -> buildTree newNodes (FunctionCallExpression { Args = right } :: current)
+        | x :: rest when x.Type = Parser.Assignment ->
+            let newNodes, right = parseAST rest []
+            buildTree newNodes (AssignmentNode { Left = child; Right = right } :: current)
+        | x :: _ when x.Type = Parser.ObjectLiteral ->
+            let newNodes, obj = parseObject true returnNodes []
 
-                match current with
-                | ObjectExpression l :: rest -> buildTree delimiter newNodes (obj :: rest)
-                | _ -> buildTree delimiter newNodes (obj :: current)
+            match current with
+            | ObjectExpression l :: rest -> buildTree newNodes (obj :: rest)
+            | _ -> buildTree newNodes (obj :: current)
 
-            | _ -> buildTree delimiter returnNodes (child :: current)
+        | _ -> buildTree returnNodes (child :: current)
 
 let rec reverseTransform node =
     let curriedFunc =
@@ -439,8 +407,13 @@ let rec reverseTransform node =
                 | StaticProperty(name, value) -> StaticProperty(name, reverseTransform value))
             props
         |> fun x -> ObjectExpression { Properties = List.rev x }
+    | DoExpressionNode node -> DoExpressionNode <| reverseTransform node
     | _ -> node
 
 let transform (ast: Parser.ASTNode) =
-    RootNode { Children = (buildTree NoDelimiter ast.Children []) |> snd }
+    RootNode { Children = (buildTree ast.Children []) |> snd }
+    |> fun ast ->
+        match ast with
+        | RootNode x -> RootNode { Children = EOF :: x.Children }
+        | _ -> ast
     |> reverseTransform
